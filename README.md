@@ -256,3 +256,18 @@ These checks parse the full script and exercise isolated functions with mocked
 processes and temporary reports. They do not validate Windows elevation, scanner
 installation/downloads, real SCC/OpenSCAP runs, or PDF rendering. `All` currently
 requests the scanner's native outputs; it does not run every format converter.
+
+
+### Follow-up review fixes
+
+HTML/PDF conversion uses the configured scanner and enforces the timeout and
+exit code. Existing native reports are reused. Converted files are included in
+`OutputFiles`; a failed requested conversion marks the scan result `Failed`.
+OpenSCAP HTML requests require both nonempty XML and HTML reports. SCC log-only
+output is rejected. Standard XCCDF results from either scanner use the same
+namespace-aware parser for CSV and vulnerability-manager JSON. Export rejects
+empty findings and creates its destination directory when needed.
+
+The regression checks also cover these reporting and export paths with mocked
+processes. No Windows elevation, installation, live scanner, or PDF-rendering
+validation is implied.
