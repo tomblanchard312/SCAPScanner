@@ -687,6 +687,16 @@ function Get-SCAPContentFile {
 #endregion
 
 #region Scanning Functions
+function Get-ScannerExecutable {
+    param([string]$ScannerType, [string]$ScannerPath)
+    if (Test-Path -LiteralPath $ScannerPath -PathType Leaf) { return $ScannerPath }
+    $name = if ($ScannerType -eq 'SCC') { 'scc.exe' } else { 'oscap.exe' }
+    foreach ($candidate in @((Join-Path $ScannerPath $name), (Join-Path $ScannerPath "bin/$name"))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    throw "$ScannerType executable not found under $ScannerPath"
+}
+
 function Start-SCAPScan {
     param (
         [string]$ScannerType,
@@ -722,14 +732,7 @@ function Start-SCAPScan {
     try {
         switch ($ScannerType) {
         "SCC" {
-            $sccExe = if (Test-Path -LiteralPath $ScannerPath -PathType Leaf) {
-                $ScannerPath
-            } else {
-                Join-Path -Path $ScannerPath -ChildPath "scc.exe"
-            }
-            if (-not (Test-Path -LiteralPath $sccExe -PathType Leaf)) {
-                throw "SCC executable not found: $sccExe"
-            }
+            $sccExe = Get-ScannerExecutable -ScannerType $ScannerType -ScannerPath $ScannerPath
             $outputDir = "$scanResultPath`_$( [guid]::NewGuid().ToString('N') )"
             New-Item -ItemType Directory -Path $outputDir -ErrorAction Stop | Out-Null
             $scanArgs = "-o `"$outputDir`" -i `"$ContentFile`" -v"
@@ -742,7 +745,8 @@ function Start-SCAPScan {
                 throw "SCC scan failed with exit code: $($process.ExitCode)"
             }
             # Only this invocation's output can establish scan success.
-            $resultFiles = @(Get-ChildItem -LiteralPath $outputDir -File -Recurse -ErrorAction Stop)
+            $resultFiles = @(Get-ChildItem -LiteralPath $outputDir -File -Recurse -ErrorAction Stop |
+                Where-Object { $_.Extension -in @('.xml', '.html', '.htm', '.ckl', '.csv', '.pdf') -and $_.Length -gt 0 })
             if ($resultFiles.Count -eq 0) {
                 throw "SCC completed without producing reports in $outputDir"
             }
@@ -755,21 +759,8 @@ function Start-SCAPScan {
             }
         }
             "OpenSCAP" {
-                # Find OpenSCAP executables
-                $oscapExe = Join-Path -Path $ScannerPath -ChildPath "bin\oscap.exe"
-                
-                if (Test-Path -LiteralPath $ScannerPath -PathType Leaf) {
-                    $oscapExe = $ScannerPath
-                }
-                elseif (-not (Test-Path -LiteralPath $oscapExe -PathType Leaf)) {
-                    $oscapExe = Join-Path -Path $ScannerPath -ChildPath "oscap.exe"
-                    
-                    if (-not (Test-Path -Path $oscapExe)) {
-                        Write-Log "OpenSCAP executable not found at $oscapExe" -Level 'ERROR'
-                        return $null
-                    }
-                }
-                
+                $oscapExe = Get-ScannerExecutable -ScannerType $ScannerType -ScannerPath $ScannerPath
+
                 # Define report file paths based on format
                 $xmlReport = "$scanResultPath.xml"
                 $htmlReport = "$scanResultPath.html"
@@ -813,7 +804,11 @@ function Start-SCAPScan {
                         $resultFiles += $htmlReport
                     }
                     
-                    if ($resultFiles.Count -gt 0) {
+                    if ((Test-Path -LiteralPath $xmlReport -PathType Leaf) -and
+                        (Get-Item -LiteralPath $xmlReport).Length -gt 0 -and
+                        ($ReportFormat -notin @('HTML', 'All') -or
+                            ((Test-Path -LiteralPath $htmlReport -PathType Leaf) -and
+                             (Get-Item -LiteralPath $htmlReport).Length -gt 0))) {
                         $resultObj = @{
                             TargetHost = $TargetHost
                             ScannerType = $ScannerType
@@ -848,12 +843,33 @@ function Start-SCAPScan {
 #endregion
 
 #region Report Functions
+function Get-XccdfResults {
+    param([xml]$Xml)
+    $ns = New-Object System.Xml.XmlNamespaceManager($Xml.NameTable)
+    $ns.AddNamespace('xccdf', $Xml.DocumentElement.NamespaceURI)
+    $rules = @{}
+    foreach ($rule in $Xml.SelectNodes('//xccdf:Rule', $ns)) { $rules[$rule.id] = $rule }
+    foreach ($result in $Xml.SelectNodes('//xccdf:TestResult/xccdf:rule-result', $ns)) {
+        $rule = $rules[$result.idref]
+        [PSCustomObject]@{
+            RuleId = $result.idref
+            Title = if ($rule) { $rule.SelectSingleNode('xccdf:title', $ns).InnerText } else { '' }
+            Severity = if ($rule) { $rule.severity } else { '' }
+            Result = $result.result
+            Description = if ($rule) { $rule.SelectSingleNode('xccdf:description', $ns).InnerText } else { '' }
+            Fix = if ($rule) { $rule.SelectSingleNode('xccdf:fix', $ns).InnerText } else { '' }
+        }
+    }
+}
+
 function Convert-ReportFormat {
     param (
         [string]$ScannerType,
         [string]$InputFile,
         [string]$OutputFormat,
-        [string]$OutputPath
+        [string]$OutputPath,
+        [string]$ScannerPath,
+        [int]$Timeout = 3600
     )
     
     if (-not (Test-Path -Path $InputFile)) {
@@ -882,7 +898,7 @@ function Convert-ReportFormat {
                 $htmlOutput = Join-Path -Path $OutputPath -ChildPath "$baseOutputName.html"
                 
                 try {
-                    $oscapExe = "C:\Program Files\OpenSCAP\bin\oscap.exe"
+                    $oscapExe = Get-ScannerExecutable -ScannerType $ScannerType -ScannerPath $ScannerPath
                     $convArgs = @(
                         "xccdf",
                         "generate",
@@ -892,9 +908,14 @@ function Convert-ReportFormat {
                         """$htmlOutput"""
                     )
                     
-                    Start-Process -FilePath $oscapExe -ArgumentList $convArgs -NoNewWindow -Wait
+                    $process = Start-Process -FilePath $oscapExe -ArgumentList $convArgs -NoNewWindow -PassThru -ErrorAction Stop
+                    if (-not $process.WaitForExit($Timeout * 1000)) {
+                        Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                        throw "HTML conversion timed out"
+                    }
+                    if ($process.ExitCode -ne 0) { throw "HTML conversion failed: $($process.ExitCode)" }
                     
-                    if (Test-Path -Path $htmlOutput) {
+                    if ((Test-Path -LiteralPath $htmlOutput -PathType Leaf) -and (Get-Item -LiteralPath $htmlOutput).Length -gt 0) {
                         Write-Log "Successfully converted XML to HTML: $htmlOutput" -Level 'SUCCESS'
                         return $htmlOutput
                     }
@@ -929,7 +950,7 @@ function Convert-ReportFormat {
                     $InputFile
                 }
                 else {
-                    $htmlOutput = Convert-ReportFormat -ScannerType $ScannerType -InputFile $InputFile -OutputFormat "HTML" -OutputPath $OutputPath
+                    $htmlOutput = Convert-ReportFormat -ScannerType $ScannerType -InputFile $InputFile -OutputFormat "HTML" -OutputPath $OutputPath -ScannerPath $ScannerPath -Timeout $Timeout
                     if (-not $htmlOutput) {
                         return $null
                     }
@@ -939,9 +960,14 @@ function Convert-ReportFormat {
                 $pdfOutput = Join-Path -Path $OutputPath -ChildPath "$baseOutputName.pdf"
                 
                 try {
-                    Start-Process -FilePath wkhtmltopdf -ArgumentList """$htmlFile""", """$pdfOutput""" -NoNewWindow -Wait
+                    $process = Start-Process -FilePath wkhtmltopdf -ArgumentList """$htmlFile""", """$pdfOutput""" -NoNewWindow -PassThru -ErrorAction Stop
+                    if (-not $process.WaitForExit($Timeout * 1000)) {
+                        Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                        throw "PDF conversion timed out"
+                    }
+                    if ($process.ExitCode -ne 0) { throw "PDF conversion failed: $($process.ExitCode)" }
                     
-                    if (Test-Path -Path $pdfOutput) {
+                    if ((Test-Path -LiteralPath $pdfOutput -PathType Leaf) -and (Get-Item -LiteralPath $pdfOutput).Length -gt 0) {
                         Write-Log "Successfully converted to PDF: $pdfOutput" -Level 'SUCCESS'
                         return $pdfOutput
                     }
@@ -969,28 +995,14 @@ function Convert-ReportFormat {
                 
                 try {
                     # Load XML and convert to CSV
-                    [xml]$xml = Get-Content -Path $InputFile
+                    [xml]$xml = Get-Content -LiteralPath $InputFile -Raw -ErrorAction Stop
                     
                     # Extract results based on scanner type
                     $results = @()
                     
-                    if ($ScannerType -eq "OpenSCAP") {
-                        $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
-                        $ns.AddNamespace('xccdf', $xml.DocumentElement.NamespaceURI)
-                        $rules = @{}
-                        foreach ($rule in $xml.SelectNodes('//xccdf:Rule', $ns)) {
-                            $rules[$rule.id] = $rule
-                        }
-                        foreach ($ruleResult in $xml.SelectNodes('//xccdf:TestResult/xccdf:rule-result', $ns)) {
-                            $rule = $rules[$ruleResult.idref]
-                            $results += [PSCustomObject]@{
-                                RuleId = $ruleResult.idref
-                                Title = if ($rule) { $rule.SelectSingleNode('xccdf:title', $ns).InnerText } else { '' }
-                                Severity = if ($rule) { $rule.severity } else { '' }
-                                Result = $ruleResult.result
-                                Description = if ($rule) { $rule.SelectSingleNode('xccdf:description', $ns).InnerText } else { '' }
-                            }
-                        }
+                    if ($ScannerType -eq "OpenSCAP" -or $xml.DocumentElement.NamespaceURI -in @(
+                        'http://checklists.nist.gov/xccdf/1.1', 'http://checklists.nist.gov/xccdf/1.2')) {
+                        $results = @(Get-XccdfResults -Xml $xml)
                     }
                     elseif ($ScannerType -eq "SCC") {
                         # Attempt to parse SCC XML structure
@@ -1011,7 +1023,7 @@ function Convert-ReportFormat {
                         throw "No supported rule results found in $InputFile"
                     }
                     # Export to CSV
-                    $results | Export-Csv -Path $csvOutput -NoTypeInformation
+                    $results | Export-Csv -LiteralPath $csvOutput -NoTypeInformation -ErrorAction Stop
                     
                     if (Test-Path -Path $csvOutput) {
                         Write-Log "Successfully converted XML to CSV: $csvOutput" -Level 'SUCCESS'
@@ -1036,6 +1048,29 @@ function Convert-ReportFormat {
             Write-Log "Unsupported output format: $OutputFormat" -Level 'ERROR'
             return $null
         }
+    }
+}
+
+function Complete-ScanReports {
+    param($ScanResult, [string]$ReportFormat, [string]$OutputPath, [string]$ScannerPath, [int]$Timeout)
+    if ($ReportFormat -eq 'All') { return }
+    if (@($ScanResult.OutputFiles | Where-Object {
+        [IO.Path]::GetExtension($_) -eq ".$($ReportFormat.ToLowerInvariant())"
+    }).Count -gt 0) { return }
+    $inputFile = $ScanResult.OutputFiles | Where-Object { $_ -like '*.xml' } | Select-Object -First 1
+    if ($ReportFormat -eq 'PDF') {
+        $html = $ScanResult.OutputFiles | Where-Object { $_ -like '*.html' } | Select-Object -First 1
+        if ($html) { $inputFile = $html }
+    }
+    $converted = if ($inputFile) {
+        Convert-ReportFormat -ScannerType $ScanResult.ScannerType -InputFile $inputFile -OutputFormat $ReportFormat `
+            -OutputPath $OutputPath -ScannerPath $ScannerPath -Timeout $Timeout
+    }
+    if ($converted -and (Test-Path -LiteralPath $converted -PathType Leaf)) {
+        $ScanResult.OutputFiles = @($ScanResult.OutputFiles + $converted | Select-Object -Unique)
+    } else {
+        $ScanResult.Status = 'Failed'
+        Write-Log "Failed to generate requested $ReportFormat report for $($ScanResult.TargetHost)" -Level 'ERROR'
     }
 }
 
@@ -1067,27 +1102,14 @@ function Export-ToVulnerabilityManager {
             $xmlFile = $result.OutputFiles | Where-Object { $_ -like "*.xml" } | Select-Object -First 1
             
             if ($xmlFile -and (Test-Path -Path $xmlFile)) {
-                [xml]$xml = Get-Content -Path $xmlFile
+                [xml]$xml = Get-Content -LiteralPath $xmlFile -Raw -ErrorAction Stop
                 
                 # Parse the XML based on scanner type
                 $parsedResults = @()
                 
-                if ($ScannerType -eq "OpenSCAP") {
-                    $testResults = $xml.SelectNodes("//rule-result")
-                    
-                    foreach ($testResult in $testResults) {
-                        $ruleId = $testResult.idref
-                        $rule = $xml.SelectSingleNode("//Rule[@id='$ruleId']")
-                        
-                        $parsedResults += [PSCustomObject]@{
-                            RuleId = $ruleId
-                            Title = $rule.title
-                            Severity = $rule.severity
-                            Result = $testResult.result
-                            Description = $rule.description
-                            Fix = $rule.fix.'#text'
-                        }
-                    }
+                if ($ScannerType -eq "OpenSCAP" -or $xml.DocumentElement.NamespaceURI -in @(
+                    'http://checklists.nist.gov/xccdf/1.1', 'http://checklists.nist.gov/xccdf/1.2')) {
+                    $parsedResults = @(Get-XccdfResults -Xml $xml)
                 }
                 elseif ($ScannerType -eq "SCC") {
                     $testResults = $xml.SelectNodes("//result")
@@ -1104,6 +1126,9 @@ function Export-ToVulnerabilityManager {
                     }
                 }
                 
+                if ($parsedResults.Count -eq 0) {
+                    throw "No supported rule results found in $xmlFile"
+                }
                 # Add parsed results to export summary
                 $exportSummary.Results += [PSCustomObject]@{
                     TargetHost = $result.TargetHost
@@ -1113,9 +1138,11 @@ function Export-ToVulnerabilityManager {
             }
         }
         
+        if ($exportSummary.Results.Count -eq 0) { throw "No results available for export" }
+        New-Item -ItemType Directory -Path $VulnerabilityManagerPath -Force -ErrorAction Stop | Out-Null
         # Export to vulnerability manager
         $exportFile = Join-Path -Path $VulnerabilityManagerPath -ChildPath "SCAP_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
-        $exportSummary | ConvertTo-Json -Depth 5 | Out-File -FilePath $exportFile
+        $exportSummary | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $exportFile -ErrorAction Stop
         
         if (Test-Path -Path $exportFile) {
             Write-Log "Successfully exported results to $exportFile" -Level 'SUCCESS'
@@ -1304,19 +1331,8 @@ foreach ($targetHost in $TargetHosts) {
     if ($result) {
         $ScanResults += $result
         
-        # Convert reports to requested format if needed
-        if ($ReportFormat -ne "All") {
-            $xmlFile = $result.OutputFiles | Where-Object { $_ -like "*.xml" } | Select-Object -First 1
-            
-            if ($xmlFile) {
-                $convertedFile = Convert-ReportFormat -ScannerType $ScannerType -InputFile $xmlFile `
-                                                    -OutputFormat $ReportFormat -OutputPath $OutputPath
-                
-                if ($convertedFile -and (Test-Path -Path $convertedFile)) {
-                    Write-Log "Generated $ReportFormat report: $convertedFile" -Level 'SUCCESS'
-                }
-            }
-        }
+        Complete-ScanReports -ScanResult $result -ReportFormat $ReportFormat -OutputPath $OutputPath `
+            -ScannerPath $ScannerPath -Timeout $Timeout
     }
     else {
         $ScanResults += @{
