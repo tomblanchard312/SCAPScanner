@@ -51,6 +51,7 @@ param(
     [switch]$SkipRemediationChecks = $false,
     
     [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 2147483)]
     [int]$Timeout = 3600,
     
     [Parameter(Mandatory = $false)]
@@ -699,6 +700,14 @@ function Start-SCAPScan {
     )
     
     Write-Log "Starting SCAP scan on $TargetHost using $ScannerType" -Level 'INFO'
+    if ($TargetHost -notin @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1', '::1')) {
+        Write-Log "Remote scanning is not implemented. Run this script on $TargetHost instead." -Level 'ERROR'
+        return $null
+    }
+    if ($Timeout -lt 1 -or $Timeout -gt 2147483) {
+        Write-Log "Timeout must be between 1 and 2147483 seconds." -Level 'ERROR'
+        return $null
+    }
     
     # Create output directory if it doesn't exist
     if (-not (Test-Path -Path $OutputPath)) {
@@ -706,116 +715,54 @@ function Start-SCAPScan {
     }
     
     # Generate output file paths
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fffffff"
     $baseOutputName = "SCAP_Scan_${TargetHost}_${timestamp}"
     $scanResultPath = Join-Path -Path $OutputPath -ChildPath $baseOutputName
     
     try {
         switch ($ScannerType) {
         "SCC" {
-            # Use the full path to scc.exe that we know works
-            $sccExe = "C:\Program Files\SCAP Compliance Checker 5.10.1\scc.exe"
-            
-            # Create a dedicated output directory with a unique name
-            $outputDir = "C:\Temp\SCAP_Report_$timestamp"
-            if (-not (Test-Path -Path $outputDir)) {
-                New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+            $sccExe = if (Test-Path -LiteralPath $ScannerPath -PathType Leaf) {
+                $ScannerPath
+            } else {
+                Join-Path -Path $ScannerPath -ChildPath "scc.exe"
             }
-            
-            # Build the command arguments exactly like we did in the manual test
+            if (-not (Test-Path -LiteralPath $sccExe -PathType Leaf)) {
+                throw "SCC executable not found: $sccExe"
+            }
+            $outputDir = "$scanResultPath`_$( [guid]::NewGuid().ToString('N') )"
+            New-Item -ItemType Directory -Path $outputDir -ErrorAction Stop | Out-Null
             $scanArgs = "-o `"$outputDir`" -i `"$ContentFile`" -v"
-            
-            # Execute scan using the Start-Process method
-            Write-Log "Executing SCC scan: $sccExe $scanArgs" -Level 'INFO'
-            
-            try {
-                # Alternative approach: Use PowerShell's call operator directly
-                Write-Log "Trying alternative execution method..." -Level 'INFO'
-                $command = "& `"$sccExe`" $scanArgs"
-                Write-Log "Command: $command" -Level 'INFO'
-                
-                Invoke-Expression $command
-                
-                # Since we're not capturing the process, assume success if no exception
-                Write-Log "SCC scan appears to have completed" -Level 'INFO'
-                
-                # Wait a moment for files to be created
-                Start-Sleep -Seconds 10
-                
-                # Look for the most recent SCC session directory
-                $sccSessionsDir = "$env:USERPROFILE\SCC\Sessions"
-                Write-Log "Checking for results in: $sccSessionsDir" -Level 'INFO'
-                
-                $latestSession = Get-ChildItem -Path $sccSessionsDir -Directory | 
-                                Sort-Object -Property LastWriteTime -Descending | 
-                                Select-Object -First 1
-                
-                if ($latestSession) {
-                    $resultsDir = Join-Path -Path $latestSession.FullName -ChildPath "Results"
-                    
-                    if (Test-Path -Path $resultsDir) {
-                        $resultFiles = Get-ChildItem -Path $resultsDir -Recurse
-                        
-                        if ($resultFiles -and $resultFiles.Count -gt 0) {
-                            Write-Log "Found $($resultFiles.Count) result files in: $resultsDir" -Level 'SUCCESS'
-                            
-                            $resultObj = @{
-                                TargetHost = $TargetHost
-                                ScannerType = $ScannerType
-                                OutputFiles = $resultFiles.FullName
-                                Status = "Success"
-                                Timestamp = Get-Date
-                            }
-                            
-                            return $resultObj
-                        }
-                    }
-                }
-                
-                # If we couldn't find results, look in our specified output directory
-                if (Test-Path -Path $outputDir) {
-                    $resultFiles = Get-ChildItem -Path $outputDir -Recurse
-                    
-                    if ($resultFiles -and $resultFiles.Count -gt 0) {
-                        Write-Log "Found $($resultFiles.Count) result files in: $outputDir" -Level 'SUCCESS'
-                        
-                        $resultObj = @{
-                            TargetHost = $TargetHost
-                            ScannerType = $ScannerType
-                            OutputFiles = $resultFiles.FullName
-                            Status = "Success"
-                            Timestamp = Get-Date
-                        }
-                        
-                        return $resultObj
-                    }
-                }
-                
-                # If we still can't find results but didn't get an error, assume success
-                Write-Log "Scan completed, but couldn't find result files" -Level 'WARNING'
-                Write-Log "Check manually in: $sccSessionsDir" -Level 'INFO'
-                Write-Log "Check manually in: $outputDir" -Level 'INFO'
-                
-                return @{
-                    TargetHost = $TargetHost
-                    ScannerType = $ScannerType
-                    OutputFiles = @()
-                    Status = "Success"
-                    Timestamp = Get-Date
-                }
+            $process = Start-Process -FilePath $sccExe -ArgumentList $scanArgs -NoNewWindow -PassThru -ErrorAction Stop
+            if (-not $process.WaitForExit($Timeout * 1000)) {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                throw "SCC scan timed out after $Timeout seconds"
             }
-            catch {
-                Write-Log "Error executing SCC scan: $_" -Level 'ERROR'
-                return $null
+            if ($process.ExitCode -ne 0) {
+                throw "SCC scan failed with exit code: $($process.ExitCode)"
+            }
+            # Only this invocation's output can establish scan success.
+            $resultFiles = @(Get-ChildItem -LiteralPath $outputDir -File -Recurse -ErrorAction Stop)
+            if ($resultFiles.Count -eq 0) {
+                throw "SCC completed without producing reports in $outputDir"
+            }
+            return @{
+                TargetHost = $TargetHost
+                ScannerType = $ScannerType
+                OutputFiles = @($resultFiles.FullName)
+                Status = "Success"
+                Timestamp = Get-Date
             }
         }
             "OpenSCAP" {
                 # Find OpenSCAP executables
                 $oscapExe = Join-Path -Path $ScannerPath -ChildPath "bin\oscap.exe"
                 
-                if (-not (Test-Path -Path $oscapExe)) {
-                    # Try alternative locations
-                    $oscapExe = "C:\Program Files\OpenSCAP\bin\oscap.exe"
+                if (Test-Path -LiteralPath $ScannerPath -PathType Leaf) {
+                    $oscapExe = $ScannerPath
+                }
+                elseif (-not (Test-Path -LiteralPath $oscapExe -PathType Leaf)) {
+                    $oscapExe = Join-Path -Path $ScannerPath -ChildPath "oscap.exe"
                     
                     if (-not (Test-Path -Path $oscapExe)) {
                         Write-Log "OpenSCAP executable not found at $oscapExe" -Level 'ERROR'
@@ -833,19 +780,9 @@ function Start-SCAPScan {
                     "eval"
                 )
                 
-                if ($TargetHost -ne $env:COMPUTERNAME) {
-                    # OpenSCAP supports SSH for remote scanning
-                    $scanArgs += @("--remote-host", $TargetHost)
-                }
-                
-                if ($SkipRemediationChecks) {
-                    $scanArgs += "--skip-remediation"
-                }
-                
+                # Evaluation does not request remediation; no skip flag is needed.
                 # Add report formats
-                if ($ReportFormat -eq "XML" -or $ReportFormat -eq "All") {
-                    $scanArgs += @("--results", """$xmlReport""")
-                }
+                $scanArgs += @("--results", """$xmlReport""")
                 
                 if ($ReportFormat -eq "HTML" -or $ReportFormat -eq "All") {
                     $scanArgs += @("--report", """$htmlReport""")
@@ -856,8 +793,13 @@ function Start-SCAPScan {
                 
                 # Execute scan
                 Write-Log "Executing OpenSCAP scan: $oscapExe $scanArgs" -Level 'INFO'
-                $process = Start-Process -FilePath $oscapExe -ArgumentList $scanArgs -NoNewWindow -PassThru -Wait
-                if ($process.ExitCode -eq 0) {
+                $process = Start-Process -FilePath $oscapExe -ArgumentList $scanArgs -NoNewWindow -PassThru -ErrorAction Stop
+                if (-not $process.WaitForExit($Timeout * 1000)) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                    throw "OpenSCAP scan timed out after $Timeout seconds"
+                }
+                # Exit 2 means evaluation completed with failed or unknown rules.
+                if ($process.ExitCode -in @(0, 2)) {
                     Write-Log "OpenSCAP scan completed successfully" -Level 'SUCCESS'
                     
                     # Locate result files
@@ -1033,19 +975,20 @@ function Convert-ReportFormat {
                     $results = @()
                     
                     if ($ScannerType -eq "OpenSCAP") {
-                        $rules = $xml.Benchmark.Rule
-                        
-                        foreach ($rule in $rules) {
-                            $result = $xml.SelectNodes("//rule-result[@idref='$($rule.id)']") | Select-Object -First 1
-                            
-                            if ($result) {
-                                $results += [PSCustomObject]@{
-                                    RuleId = $rule.id
-                                    Title = $rule.title
-                                    Severity = $rule.severity
-                                    Result = $result.result
-                                    Description = $rule.description
-                                }
+                        $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+                        $ns.AddNamespace('xccdf', $xml.DocumentElement.NamespaceURI)
+                        $rules = @{}
+                        foreach ($rule in $xml.SelectNodes('//xccdf:Rule', $ns)) {
+                            $rules[$rule.id] = $rule
+                        }
+                        foreach ($ruleResult in $xml.SelectNodes('//xccdf:TestResult/xccdf:rule-result', $ns)) {
+                            $rule = $rules[$ruleResult.idref]
+                            $results += [PSCustomObject]@{
+                                RuleId = $ruleResult.idref
+                                Title = if ($rule) { $rule.SelectSingleNode('xccdf:title', $ns).InnerText } else { '' }
+                                Severity = if ($rule) { $rule.severity } else { '' }
+                                Result = $ruleResult.result
+                                Description = if ($rule) { $rule.SelectSingleNode('xccdf:description', $ns).InnerText } else { '' }
                             }
                         }
                     }
@@ -1064,6 +1007,9 @@ function Convert-ReportFormat {
                         }
                     }
                     
+                    if ($results.Count -eq 0) {
+                        throw "No supported rule results found in $InputFile"
+                    }
                     # Export to CSV
                     $results | Export-Csv -Path $csvOutput -NoTypeInformation
                     
@@ -1253,7 +1199,7 @@ if ($InstallScanner -or -not $ScannerPath) {
     # Verify we got a valid path back
     if (-not $ScannerPath -or -not (Test-Path -Path $ScannerPath)) {
         Write-Log "Failed to install or locate $ScannerType scanner using $InstallMethod method." -Level 'ERROR'
-        Write-Log "ScannerPath returned: $ScannerPath" -Level 'DEBUG'
+        Write-Log "ScannerPath returned: $ScannerPath" -Level 'ERROR'
         Write-Log "Try a different installation method or specify an existing scanner path." -Level 'INFO'
         
         # Ask user if they want to try a different installation method
@@ -1287,7 +1233,7 @@ if ($InstallScanner -or -not $ScannerPath) {
             
             if (-not $ScannerPath -or -not (Test-Path -Path $ScannerPath)) {
                 Write-Log "Failed to install or locate $ScannerType scanner using $InstallMethod method." -Level 'ERROR'
-                Write-Log "ScannerPath returned: $ScannerPath" -Level 'DEBUG'
+                Write-Log "ScannerPath returned: $ScannerPath" -Level 'ERROR'
                 Write-Log "Exiting script." -Level 'ERROR'
                 exit 1
             }

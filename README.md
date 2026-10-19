@@ -4,7 +4,7 @@ A comprehensive PowerShell script for running SCAP compliance scans on Windows s
 
 ## Overview
 
-This tool provides a PowerShell interface for performing Security Content Automation Protocol (SCAP) scans on local and remote Windows systems. It supports multiple SCAP scanning engines, benchmarks, and reporting formats, making it easy to integrate with existing vulnerability management processes.
+This tool provides a PowerShell interface for performing Security Content Automation Protocol (SCAP) scans on local Windows systems. It supports multiple SCAP scanning engines, benchmarks, and reporting formats, making it easy to integrate with existing vulnerability management processes.
 
 ## Features
 
@@ -12,7 +12,7 @@ This tool provides a PowerShell interface for performing Security Content Automa
 - Automatic installation of scanning tools and content
 - Multiple benchmark support (DISA STIGs, NIST 800-53, CIS, etc.)
 - Support for custom SCAP content
-- Local and remote scanning capabilities
+- Local scanning; remote targets are rejected to prevent mislabeled local results
 - Flexible reporting formats (XML, HTML, CSV, PDF)
 - Integration with vulnerability management systems
 - Detailed logging and progress tracking
@@ -57,7 +57,7 @@ To run a more customized scan:
 ```powershell
 .\SCAP-Scanner.ps1 -ScannerType OpenSCAP `
                    -Benchmark CIS `
-                   -TargetHosts "Server01", "Server02" `
+                   -TargetHosts "localhost" `
                    -ReportFormat All `
                    -OutputPath "C:\SCAP_Reports"
 ```
@@ -112,12 +112,12 @@ To use custom SCAP content:
 .\SCAP-Scanner.ps1 -Benchmark DISA_STIG
 ```
 
-### Scan Multiple Remote Servers with CIS Benchmark
+### Scan the Local System with CIS Benchmark
 
 ```powershell
 .\SCAP-Scanner.ps1 -ScannerType SCC `
                    -Benchmark CIS `
-                   -TargetHosts "Server01", "Server02", "Server03" `
+                   -TargetHosts "localhost" `
                    -ReportFormat HTML
 ```
 
@@ -232,3 +232,27 @@ This script is provided as-is with no warranties.
 - DISA for STIG content
 - NIST for SCAP specifications
 - OpenSCAP and SCC development teams
+
+## Execution fixes and validation
+
+Scanner paths are honored, including executable paths and paths containing spaces.
+Scans enforce `-Timeout`, reject unsupported remote targets, and fail when no reports
+are produced. SCC reports are read only from a unique directory under `-OutputPath`;
+old SCC sessions are never treated as evidence of a new scan. If your SCC version
+ignores its output option, the script fails rather than reusing an earlier report.
+OpenSCAP always saves XML for subsequent conversion and treats exit code 2 as a
+completed evaluation with failed or unknown rules, not scanner failure.
+`-SkipRemediationChecks` is retained for compatibility; OpenSCAP evaluation does
+not request remediation. Remote execution is not implemented: run the script on
+each target locally. `Success` means scanning completed, not that the host complies.
+
+Run the dependency-free regression checks without installation or elevation:
+
+```powershell
+pwsh -NoProfile -File tests/Scan.Tests.ps1
+```
+
+These checks parse the full script and exercise isolated functions with mocked
+processes and temporary reports. They do not validate Windows elevation, scanner
+installation/downloads, real SCC/OpenSCAP runs, or PDF rendering. `All` currently
+requests the scanner's native outputs; it does not run every format converter.
