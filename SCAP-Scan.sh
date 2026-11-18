@@ -188,8 +188,11 @@ install_scanner() {
             die "Failed to install openscap-scanner via apt-get"
         local pkg
         for pkg in ssg-base ssg-debian ssg-debderived ssg-applications; do
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" 2>/dev/null \
-                && log INFO "Installed $pkg" || log WARNING "Package $pkg not available; skipping"
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" 2>/dev/null; then
+                log INFO "Installed $pkg"
+            else
+                log WARNING "Package $pkg not available; skipping"
+            fi
         done
     elif command -v dnf >/dev/null 2>&1; then
         log INFO "Installing OpenSCAP and SSG content via dnf"
@@ -385,7 +388,8 @@ print_summary() {
 export_json() {
     local dir="$1" results="$2" profile="$3" ds="$4"
     mkdir -p "$dir"
-    local out="${dir}/SCAP_Export_$(date '+%Y%m%d_%H%M%S').json"
+    local out
+    out="${dir}/SCAP_Export_$(date '+%Y%m%d_%H%M%S').json"
     local produced=()
     [[ -s "$RESULT_XML" ]]  && produced+=("\"$RESULT_XML\"")
     [[ -s "${REPORT_HTML:-}" ]] && produced+=("\"$REPORT_HTML\"")
