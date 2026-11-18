@@ -99,6 +99,16 @@ try {
     Assert ($rows.Count -eq 1 -and $rows[0].Title -eq 'Nested rule' -and $rows[0].Result -eq 'fail') 'Namespaced grouped XCCDF rules must export'
     $sccCsv = Convert-ReportFormat -ScannerType SCC -InputFile $xml -OutputFormat CSV -OutputPath $root
     Assert (@(Import-Csv $sccCsv).Count -eq 1) 'SCC XCCDF must use the same namespaced parser'
+    $sparse = Join-Path $root 'sparse.xml'
+    Set-Content $sparse @'
+<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2">
+  <Rule id="bare" severity="low"/>
+  <TestResult id="test"><rule-result idref="bare"><result>pass</result></rule-result></TestResult>
+</Benchmark>
+'@
+    $sparseCsv = Convert-ReportFormat -ScannerType OpenSCAP -InputFile $sparse -OutputFormat CSV -OutputPath $root
+    $sparseRows = @(Import-Csv $sparseCsv)
+    Assert ($sparseRows.Count -eq 1 -and $sparseRows[0].RuleId -eq 'bare' -and $sparseRows[0].Title -eq '') 'Rules missing title/description/fix must export with empty fields, not crash'
     $ScannerType = 'OpenSCAP'
     $exportDir = Join-Path $root 'new export directory'
     $scan = @{ TargetHost = 'localhost'; OutputFiles = @($xml); Status = 'Success' }

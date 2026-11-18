@@ -6,10 +6,16 @@ A comprehensive PowerShell script for running SCAP compliance scans on Windows s
 
 This tool provides a PowerShell interface for performing Security Content Automation Protocol (SCAP) scans on local Windows systems. It supports multiple SCAP scanning engines, benchmarks, and reporting formats, making it easy to integrate with existing vulnerability management processes.
 
+> **Platform & content notes**
+>
+> - **Windows:** use `-ScannerType SCC`. OpenSCAP removed Microsoft Windows support on 2022-02-01, so it cannot evaluate Windows hosts.
+> - **Windows 11 content:** the current DISA Windows 11 STIG SCAP Benchmark is **Ver 2 Rel 11 (SCAP 1.4)** and requires **SCC 5.15+**. There is no stable public, unauthenticated download URL — DISA's index is DoD-login gated and re-versioned each release, and CIS Windows 11 v5.1.0 SCAP is CIS SecureSuite-only — so the script no longer auto-downloads content. Obtain it manually and pass `-ContentPath` or `-CustomContentFile`.
+> - **Linux (Debian/Ubuntu, Fedora/RHEL):** use the [`SCAP-Scan.sh`](SCAP-Scan.sh) companion, which drives OpenSCAP with SCAP Security Guide content.
+
 ## Features
 
-- Support for multiple SCAP scanning engines (SCC and OpenSCAP)
-- Automatic installation of scanning tools and content
+- SCC for Windows scanning; OpenSCAP for Linux via the `SCAP-Scan.sh` companion
+- Automatic installation of scanning tools (and, on Linux, content)
 - Multiple benchmark support (DISA STIGs, NIST 800-53, CIS, etc.)
 - Support for custom SCAP content
 - Local scanning; remote targets are rejected to prevent mislabeled local results
@@ -220,6 +226,34 @@ For regular automated scanning, consider:
 1. Creating a scheduled task to run the script
 2. Using PowerShell workflows for parallel scanning of large environments
 3. Integrating with CI/CD pipelines for compliance checks during deployment
+
+## Linux companion: SCAP-Scan.sh
+
+`SCAP-Scan.sh` is a Bash counterpart that runs OpenSCAP on Debian/Ubuntu and
+Fedora/RHEL-family hosts using SCAP Security Guide (SSG) content. Unlike Windows
+SCAP content, SSG ships in the distro packages, so the script can install and
+locate content automatically.
+
+```bash
+# Install OpenSCAP + SSG, scan with a CIS profile, all report formats
+sudo ./SCAP-Scan.sh --install --benchmark cis --format all
+
+# List available profiles in the auto-detected datastream
+./SCAP-Scan.sh --list-profiles
+
+# Explicit profile and content, with a JSON summary
+sudo ./SCAP-Scan.sh \
+  --profile xccdf_org.ssgproject.content_profile_stig \
+  --content /usr/share/xml/scap/ssg/content/ssg-debian12-ds.xml \
+  --export ./VulnMgmt
+```
+
+Key options: `--benchmark` (keyword match: cis, stig, pci-dss, ospp, standard,
+anssi, hipaa), `--profile` (explicit id), `--content` (datastream), `--format`
+(xml|html|arf|all), `--timeout`, `--tailoring`, `--export`, `--install`,
+`--list-profiles`. Like the Windows script it scans the local host only, and it
+treats `oscap` exit code 2 (one or more rules failed) as a completed evaluation,
+not a scanner error.
 
 ## License
 

@@ -453,7 +453,64 @@ function Get-SCAPContentPath {
     return $null
 }
 
-# Fixed Update-SCAPContent function
+function New-ContentGuidancePlaceholder {
+    # No stable public, unauthenticated download URL exists for Windows SCAP
+    # content (DISA is login-gated and re-versioned every release; CIS is
+    # SecureSuite-only). Rather than attempt dead downloads, record accurate
+    # guidance and let the caller fail cleanly so the user supplies content.
+    param (
+        [string]$Benchmark,
+        [string]$ScannerType
+    )
+
+    $guidance = @"
+No SCAP content was found for benchmark '$Benchmark'.
+
+Automatic download has been removed: there is no stable public, unauthenticated
+URL for Windows SCAP content.
+
+  - DISA Windows 11 STIG SCAP Benchmark (currently Ver 2 Rel 11, SCAP 1.4) is
+    published on the DoD Cyber Exchange. The download index now requires a DoD
+    login and the file name changes every release, so it cannot be fetched by a
+    fixed URL.
+        https://public.cyber.mil/stigs/downloads/
+  - CIS Microsoft Windows 11 Enterprise Benchmark (currently v5.1.0) SCAP content
+    is available only to CIS SecureSuite members via CIS-CAT / CIS WorkBench.
+    CIS publishes the PDF benchmarks publicly, but not the SCAP content.
+        https://www.cisecurity.org/cis-securesuite
+
+Download the content manually, then re-run with an explicit path:
+    .\SCAP-Scanner.ps1 -ContentPath "C:\Path\To\Extracted\Content"
+    .\SCAP-Scanner.ps1 -Benchmark Custom -CustomContentFile "C:\Path\To\Benchmark.xml"
+
+Windows scanner notes:
+  - SCAP 1.4 content (the current DISA Windows 11 STIG) requires SCC 5.15 or
+    later. Use -ScannerType SCC for Windows hosts.
+  - OpenSCAP removed Microsoft Windows support on 2022-02-01, so
+    -ScannerType OpenSCAP cannot evaluate Windows hosts. Use OpenSCAP only for
+    Linux targets with Linux content (e.g. SCAP Security Guide).
+"@
+
+    try {
+        $dest = Join-Path -Path $SCAPContentDir -ChildPath $Benchmark
+        if (-not (Test-Path -Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+        $readme = Join-Path -Path $dest -ChildPath "README-GET-CONTENT.txt"
+        $guidance | Out-File -FilePath $readme -Encoding utf8 -Force
+        Write-Log "Wrote content-acquisition guidance to $readme" -Level 'WARNING'
+    }
+    catch {
+        Write-Log "Could not write content guidance file: $_" -Level 'WARNING'
+    }
+
+    Write-Log "No SCAP content for '$Benchmark'. Supply it with -ContentPath or -CustomContentFile." -Level 'WARNING'
+    Write-Log "DISA Win11 STIG SCAP (Ver2Rel11, SCAP 1.4, needs SCC 5.15+): https://public.cyber.mil/stigs/downloads/" -Level 'WARNING'
+    Write-Log "CIS Win11 Enterprise v5.1.0 SCAP is CIS SecureSuite only: https://www.cisecurity.org/cis-securesuite" -Level 'WARNING'
+    if ($ScannerType -eq 'OpenSCAP') {
+        Write-Log "Note: OpenSCAP removed Windows support on 2022-02-01; use -ScannerType SCC for Windows hosts." -Level 'WARNING'
+    }
+    return $null
+}
+
 function Update-SCAPContent {
     param (
         [string]$ScannerType,
@@ -494,126 +551,17 @@ function Update-SCAPContent {
                 return $contentPath
             }
             else {
-                Write-Log "Could not find SCC content directory. Attempting to download content." -Level 'WARNING'
-                
-                # If content not found, try to download it
-                $tempDir = Join-Path -Path $env:TEMP -ChildPath "SCAP_Content_$(Get-Random)"
-                New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-                
-                try {
-                    $contentUrl = "https://public.cyber.mil/stigs/downloads/?_dl_facet_stigs=all"
-                    $downloadUrl = ""
-                    
-                    switch ($Benchmark) {
-                        "DISA_STIG" {
-                            # Since we can't directly access DoD content, use a local placeholder
-                            $extractPath = Join-Path -Path $SCAPContentDir -ChildPath "DISA_STIG"
-                            if (-not (Test-Path -Path $extractPath)) {
-                                New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-                            }
-                            
-                            # Create a simple README to guide users
-                            $readmeFile = Join-Path -Path $extractPath -ChildPath "README.txt"
-                            $readmeContent = @"
-DISA STIG Content
-
-The script could not locate pre-installed SCAP content for DISA STIGs.
-Please visit https://public.cyber.mil/stigs/downloads/ to download the latest STIG content.
-
-Once downloaded, extract the content and specify the path using:
-.\SCAP-Scanner.ps1 -ContentPath "Path\To\Content"
-"@
-                            $readmeContent | Out-File -FilePath $readmeFile -Encoding utf8 -Force
-                            
-                            Write-Log "Created content placeholder at $extractPath" -Level 'WARNING'
-                            Write-Log "Please manually download DISA STIG content from https://public.cyber.mil/stigs/downloads/" -Level 'WARNING'
-                            
-                            return $extractPath
-                        }
-                        default {
-                            # For other benchmarks, attempt alternative sources
-                            Write-Log "No specific download path for $Benchmark" -Level 'WARNING'
-                            return $null
-                        }
-                    }
-                }
-                catch {
-                    Write-Log "Error downloading content: $_" -Level 'ERROR'
-                    return $null
-                }
-                finally {
-                    # Clean up
-                    if (Test-Path -Path $tempDir) {
-                        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-                }
+                Write-Log "Could not find pre-installed SCC content for '$Benchmark'." -Level 'WARNING'
+                return (New-ContentGuidancePlaceholder -Benchmark $Benchmark -ScannerType $ScannerType)
             }
         }
         "OpenSCAP" {
-            # For OpenSCAP, download content from NIST/DISA
-            $tempDir = Join-Path -Path $env:TEMP -ChildPath "SCAP_Content_$(Get-Random)"
-            New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-            
-            try {
-                $contentUrl = ""
-                $outputFile = ""
-                
-                switch ($Benchmark) {
-                    "DISA_STIG" {
-                        $contentUrl = "https://dl.dod.cyber.mil/wp-content/uploads/stigs/zip/U_MS_Windows_10_STIG_V2R4_SCAP_1-2_Benchmark.zip"
-                        $outputFile = Join-Path -Path $tempDir -ChildPath "disa_stig.zip"
-                    }
-                    "NIST_800_53" {
-                        $contentUrl = "https://csrc.nist.gov/CSRC/media/Projects/Security-Content-Automation-Protocol/specifications/nist-800-53-rev5-control-catalog-scap-1.3.zip"
-                        $outputFile = Join-Path -Path $tempDir -ChildPath "nist_800_53.zip"
-                    }
-                    "CIS" {
-                        $contentUrl = "https://learn.cisecurity.org/l/799323/2021-09-21/39kgn/799323/1632255989aNOVTTFO/CIS_Microsoft_Windows_10_Enterprise_Release_2004_Benchmark_v1.11.0_SCAP_12.zip"
-                        $outputFile = Join-Path -Path $tempDir -ChildPath "cis.zip"
-                    }
-                    default {
-                        Write-Log "No download URL defined for benchmark: $Benchmark" -Level 'ERROR'
-                        return $null
-                    }
-                }
-                
-                if ($contentUrl -and $outputFile) {
-                    Write-Log "Downloading $Benchmark content from $contentUrl" -Level 'INFO'
-                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                    Invoke-WebRequest -Uri $contentUrl -OutFile $outputFile -UseBasicParsing
-                    
-                    # Extract content
-                    $extractPath = Join-Path -Path $SCAPContentDir -ChildPath $Benchmark
-                    if (-not (Test-Path -Path $extractPath)) {
-                        New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-                    }
-                    
-                    Write-Log "Extracting $Benchmark content to $extractPath" -Level 'INFO'
-                    Expand-Archive -Path $outputFile -DestinationPath $extractPath -Force
-                    
-                    # Find XCCDF or OVAL files
-                    $xccdfFile = Get-ChildItem -Path $extractPath -Filter "*.xccdf.xml" -Recurse | Select-Object -First 1 -ExpandProperty FullName
-                    
-                    if ($xccdfFile) {
-                        Write-Log "SCAP content updated successfully: $xccdfFile" -Level 'SUCCESS'
-                        return $extractPath
-                    }
-                    else {
-                        Write-Log "Could not find XCCDF file in the downloaded content" -Level 'ERROR'
-                        return $null
-                    }
-                }
-            }
-            catch {
-                Write-Log "Error updating SCAP content: $_" -Level 'ERROR'
-                return $null
-            }
-            finally {
-                # Clean up
-                if (Test-Path -Path $tempDir) {
-                    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            }
+            # OpenSCAP removed Windows support on 2022-02-01 and there is no
+            # stable public Windows SCAP download, so no auto-download is
+            # attempted. On Linux, pass the SCAP Security Guide datastream with
+            # -ContentPath; see SCAP-Scan.sh for a Linux OpenSCAP companion.
+            Write-Log "No pre-existing OpenSCAP content located for '$Benchmark'." -Level 'WARNING'
+            return (New-ContentGuidancePlaceholder -Benchmark $Benchmark -ScannerType $ScannerType)
         }
         default {
             Write-Log "Unsupported scanner type: $ScannerType" -Level 'ERROR'
@@ -851,13 +799,25 @@ function Get-XccdfResults {
     foreach ($rule in $Xml.SelectNodes('//xccdf:Rule', $ns)) { $rules[$rule.id] = $rule }
     foreach ($result in $Xml.SelectNodes('//xccdf:TestResult/xccdf:rule-result', $ns)) {
         $rule = $rules[$result.idref]
+        $severity = ''; $title = ''; $description = ''; $fix = ''
+        if ($rule) {
+            $severity = [string]$rule.severity
+            # SelectSingleNode returns $null for absent children (e.g. rules
+            # with no <fix>); guard before touching InnerText.
+            $titleNode = $rule.SelectSingleNode('xccdf:title', $ns)
+            if ($titleNode) { $title = $titleNode.InnerText }
+            $descNode = $rule.SelectSingleNode('xccdf:description', $ns)
+            if ($descNode) { $description = $descNode.InnerText }
+            $fixNode = $rule.SelectSingleNode('xccdf:fix', $ns)
+            if ($fixNode) { $fix = $fixNode.InnerText }
+        }
         [PSCustomObject]@{
             RuleId = $result.idref
-            Title = if ($rule) { $rule.SelectSingleNode('xccdf:title', $ns).InnerText } else { '' }
-            Severity = if ($rule) { $rule.severity } else { '' }
+            Title = $title
+            Severity = $severity
             Result = $result.result
-            Description = if ($rule) { $rule.SelectSingleNode('xccdf:description', $ns).InnerText } else { '' }
-            Fix = if ($rule) { $rule.SelectSingleNode('xccdf:fix', $ns).InnerText } else { '' }
+            Description = $description
+            Fix = $fix
         }
     }
 }
