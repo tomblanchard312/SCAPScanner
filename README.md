@@ -255,6 +255,37 @@ anssi, hipaa), `--profile` (explicit id), `--content` (datastream), `--format`
 treats `oscap` exit code 2 (one or more rules failed) as a completed evaluation,
 not a scanner error.
 
+## Full host auditor: linux-security-scan.sh
+
+`linux-security-scan.sh` is a hybrid Linux security scanner for Debian/Ubuntu and
+Fedora/RHEL families. It runs native checks using standard OS commands (no
+mandatory installs, works offline) and also uses external tools when present
+(Lynis, Trivy/Grype, rkhunter, chkrootkit, AIDE, and `SCAP-Scan.sh`/oscap).
+
+Coverage: **configuration hardening** (SSH, sysctl, firewall, auditd, file
+permissions, password policy), **accounts & auth** (UID 0, empty passwords,
+duplicate UIDs, NOPASSWD sudo), **network exposure** (listening/publicly-bound
+ports vs firewall), **vulnerability/CVE** (pending security updates; optional
+Trivy), and **rootkit/file-integrity** (promiscuous NICs, deleted-binary
+processes, rkhunter/chkrootkit, AIDE).
+
+```bash
+# Full audit, all report formats, into ./SecurityScan_Reports
+sudo ./linux-security-scan.sh
+
+# Only network + vuln checks, JSON output
+sudo ./linux-security-scan.sh --only network,vuln --format json
+
+# Deep mode (full-fs walk, Trivy/rkhunter/AIDE/Lynis if installed)
+sudo ./linux-security-scan.sh --deep
+```
+
+Options: `--output-dir`, `--format` (text|json|html|all), `--only`/`--skip`
+(groups: hardening, accounts, network, vuln, rootkit, integrity),
+`--no-external` (native only), `--deep`. It writes a text log, a JSON report,
+and a styled HTML report, and exits non-zero when any HIGH finding is present so
+CI/cron can gate on it. Run as root for full coverage.
+
 ## License
 
 This project is licensed under the MIT License. See the LICENSE file for details.
